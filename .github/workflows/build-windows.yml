@@ -1,0 +1,95 @@
+name: Build Pluely for Windows
+
+# Build the Pluely desktop app for Windows on every push to main/master,
+# on version tags, and via manual dispatch. The build outputs (NSIS .exe
+# installer + MSI .msi installer) are uploaded as GitHub Actions
+# artifacts that can be downloaded directly — no release required.
+#
+# Notes for forks / re-builds:
+#   - The Rust backend reads APP_ENDPOINT, API_ACCESS_KEY, PAYMENT_ENDPOINT
+#     and POSTHOG_API_KEY at build time (see src-tauri/build.rs). If those
+#     secrets are not configured in the repo, the build still succeeds —
+#     the corresponding runtime calls just fail gracefully. Premium
+#     features have already been unlocked at the frontend layer, so the
+#     app is fully usable with the user's own AI/STT providers configured
+#     in Dev Space.
+#   - The Tauri updater is configured in tauri.conf.json but requires a
+#     signing key (TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD)
+#     to produce signed update artifacts. Without it, the build still
+#     produces installers, just without updater signatures.
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Build for Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify TypeScript compiles cleanly
+        run: npx tsc --noEmit
+
+      - name: Build frontend (Vite)
+        run: npm run build
+
+      - name: Build Tauri app for Windows
+        run: npx tauri build --target x86_64-pc-windows-msvc
+        env:
+          # Optional build-time secrets. The build will still succeed if
+          # these are unset — the corresponding runtime API calls will
+          # simply fail and the app falls back to user-configured providers.
+          APP_ENDPOINT: ${{ secrets.APP_ENDPOINT }}
+          API_ACCESS_KEY: ${{ secrets.API_ACCESS_KEY }}
+          PAYMENT_ENDPOINT: ${{ secrets.PAYMENT_ENDPOINT }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          # Required only if you want signed updater artifacts.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload NSIS installer (.exe)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pluely-windows-x86_64-nsis
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload MSI installer (.msi)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pluely-windows-x86_64-msi
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: warn
+          retention-days: 30
